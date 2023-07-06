@@ -102,6 +102,23 @@ GE 相当于一个可配置的**数据表**, 不可以添加逻辑。 开发者�
 
 > 得自己尝试各个参数的意义… 翻译不一定正确 用了才知道
 
+![GamePlay Effect](./Images/014.png)
+
+当你的 GE 是持续一段时间 或者 无限时间的时候, `Period` 就表示周期性激活
+
+- `Period` 表示时间间隔, 也就是 `interval`
+- `Execute Periodic Effect on Application` 表示是否是一激活就执行
+  - 先以 TS 的 `interval` 举例, TS 的 `interval` 在第0秒的时候并不会执行函数体, 而是第一个周期到了之后才会执行
+  - 类似的, 这里表示 GE 激活的时候立刻执行扣血逻辑, 还是等待 interval 第一个周期到了再执行扣血逻辑
+
+![GamePlay Effect](./Images/015.png)
+
+GE 中的 Stacking 表示层, 比如: Dota 中蝙蝠可以给对方叠5层油。也就是一个 buff 可以叠加多层
+
+![GamePlay Effect](./Images/016.png)
+
+GE 也可以赋予能力
+
 ### Attribute Set
 
 `AttributeSet` 负责定义和持有属性, 并且管理属性的变化, 包括网络同步
@@ -218,3 +235,27 @@ GE 相当于一个可配置的**数据表**, 不可以添加逻辑。 开发者�
 
 同理对角色的血量进行扣除
 
+### FGameplayAttributeData
+
+我们发现 `AttributeSet` 中属性的值并不是float、int等普通数据类型, 而是 `FGameplayAttributeData` 这种类型
+
+```c++
+USTRUCT(BlueprintType)
+struct GAMEPLAYABILITIES_API FGameplayAttributeData
+{
+	GENERATED_BODY()
+    // ...
+	FGameplayAttributeData(float DefaultValue)
+		: BaseValue(DefaultValue)
+		, CurrentValue(DefaultValue)
+	{}
+
+    // ...
+}
+```
+
+可以看到 `FGameplayAttributeData` 有俩个值: `BaseValue` 和 `CurrentValue`
+
+这么定义的原因是方便数据回滚, 比如Player得到一个buff可以增加攻击力10% 持续5s, 通过区分`BaseValue` 和 `CurrentValue`可以方便计算移除buff后的数值
+
+### 注意点
