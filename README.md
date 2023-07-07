@@ -1,6 +1,194 @@
 # Learn_GAS
 
-## 简介
+
+
+## GAS 介绍
+
+GAS 的优缺点
+
+| 优点 | 缺点 |
+| --- | --- |
+| 灵活易扩展, 可实现复杂的技能流程 | 大量的概念和类, 学习曲线陡峭 |
+| 支持联机复制和预测回滚 | 重度C++, BP不友好 |
+| 易于团队协作和项目复用 | 需要按照框架定义一堆才能开始启动 |
+| 细粒度思考实现单个动作逻辑 | GAS的网络服务必须配合DS |
+| 数据驱动数值配置 | 实践演化框架, 可选插件, 文档不足 |
+| 已经帮你处理复杂流程麻烦逻辑 | 要求技术功底高, 源码Debug能力强 |
+| 适用于: 人多-大项目-多技能-联机-技术强-重表现 | 不适用于: 人少-小项目-少技能-单机-技术弱-弱表现 |
+
+如何自己实现一个易于扩展的技能系统? 
+
+- 逻辑部分:
+  - 技能的获得和释放
+  - 触发判断的条件
+  - Buff系统
+- 试听部分:
+  - 动作动画
+  - 特效
+  - 声效
+- 数据部分:
+  - 数值计算
+  - 数据配置
+- 考虑网络联机
+
+设计模式的本质是: 找到变化, 封装变化
+
+由于上述这些技能的需求, 从而促成了 GAS 的诞生
+
+| GAS 类 | 简称 |
+| --- | --- |
+| UAbilitySystemComponent | ASC |
+| UGameplayAbility | GA |
+| UGameplayEffect | GE |
+| UGameplayCueNotify | GC |
+| FGameplayAttribute | Attribute |
+| FGameplayTag | Tag |
+| UGameplayTask | Task |
+| FGameplayEventData | Event |
+
+- 谁可以释放技能？ 持有 ASC 组件的 Actor
+- 如何编写技能逻辑？ 继承 GameAbility 
+- 如何技能效果？ 继承 GameEffect (属性修改、增减Buff, 并不是特效)
+- 技能改变的什么属性？ 使用 GamePlayAttribute 属性系统
+- 技能释放的条件？ 使用 GameplayTag 进行条件判断
+- 技能的视角表现效果？ 使用 GameplayCue
+- 技能的长时行动？ 使用 GameplayTask 
+- 技能消息事件？ 使用 GameplayEvent
+
+### GameplayTags
+
+GameplayTags 游戏标签
+
+- 是层次化的字符串标签 "A.B.C"
+- 轻量级 `FName` , 可附加到各类上做搜索条件: `GameplayEffect`, `GameplayAbility`, `GameplayCue`, `GameplayEventData`
+- 整体所有 `Tag` 构成一颗 `Tag` 树
+
+![](Images/017.png)
+
+![](Images/018.png)
+
+可以在子标签上进行精确匹配, 也可以在父标签上进行总类筛选
+
+子标签: `Ability.Melee.Close`; 父标签: `Ability.Melee`
+
+比如当角色存在 `Ability.Melee.Close` 和 `Ability.Melee.Far` 等 Melee 下的 Tag 时技能不生效, 那么只用配置成 `Ability.Melee` 即可。 这就是父标签可以做的总类筛选
+
+![](Images/019.png)
+
+所有的 `GameplayTag` 都可以在 Project `Settings` 中找到
+
+使用 GameplayTag 相比代码中写死 Bool、Enum 更加灵活
+
+![](Images/020.png)
+
+### GameplayEffect 
+
+技能效果
+
+- 决定一个技能的逻辑效果
+- 可以配置: 类型、修改器、周期、应用需求、溢出处理、过期处理、显示处理、Tags条件、免疫、堆叠、能力赋予
+- Effect 是修改 Attribute 的唯一通道
+
+![](Images/021.png)
+
+GE 一般通过 `UGameplayAbility` 的 Aplly 接口, 以 `UGameplayEffect` 为模板生成 `FGameplayEffectSpec` 实例化对象, `FGameplayEffectSpec` 对应一个 `FActiveGameplayEffect`, 然后通过组合到 `FActiveGamplayEffectsContainer` 容器中, 存储到 `UAbilitySystemComponent` 中
+
+### GampelayCue 
+
+技能特效
+
+- 决定一个技能的视觉效果
+- 可全局配置 `Tag-Handler` 的映射
+- 可通过 `Effect` 触发, 也可以手动触发
+- `Static`: 一次性的; `Actor`: 持久的创建在场景中
+- 可重载: `OnActive` 、 `WhileActive` 、 `Executed` 、 `Removed` 来触发粒子特效或者音效等
+
+![](Images/022.png)
+
+如上图可见, GC 一般通过 `GA` 指定 `Executed/Add` 或者 GE 配置 `Cues` 来触发;触发后生成的实例存储在 FGameplayCueObjectLibrary 里的对象库中, 以提供后续的复用, 介绍触发时的延迟
+
+GC 的触发分为两种情况: `Static` 和 `Actor`。`Static Cue` 直接在 `CDO` 上调用, 这意味着不要在 GC 中存储一些状态信息, 因为它不会生成新的对象; `Actor Cue` 触发 `Spawn` 生成新的实例, 这些生效的 GC 最终也是在 ASC 里引用保存
+
+### GameAbility
+
+游戏能力(技能)
+
+- 能力是很广义的抽象 比如被打就是一种能力 没有被打的能力就不会被被打
+- 不要把基础移动, 射线检测, UI交互当作能力
+- 在不同的 Actor 上学习、取消、释放不同能力构成了主题逻辑
+- 主要逻辑都写在 GA 里面
+- 可重载: ActivateAbility, CommitAbility, CancelAbility, EndAbility
+
+![](Images/023.png)
+
+GA 一般是在外部被 `Owner Actor` 触发, 通过调用 `TryActivateAbility`
+
+如果 GA 自身不需要保存状态, 则可以选择在 CDO 上直接调用; 如果需要每次实例化都跟踪不同的状态, 也可以选择每次生成新的实例
+
+GA 实例化之后就是 `FGameplayAbilitySpec` , 可以通过配置 `Level` 去传递给 GA 触发的 GE, 从而触发不同等级的效果
+
+这些激活的 GA 最后都会保存在 ASC 中
+
+### GameplayTask
+
+游戏异步任务
+
+> 比如: 等待 `montage` 的播放完毕、 等待 AI 移动到指定位置
+
+- 执行异步任务的框架
+- 可被单独使用-> Task 是 UE 的基础模块, 可以独立与 GAS 之外运行
+- 可用于异步长时间动画动作的触发和等待
+- 已经预先实现好一系列 Tasks
+- 可重载: `Activate、` `TickTask`
+
+![](Images/024.png)
+
+`Abilities` 插件引用 Task 模块的时候其实也是从 `GameplayTask` 里继承下来自定义子类, 这个子类多了一个 GA 的引用
+
+这些 Task 也都是在 ASC 中执行, 所以 ASC 也是继承于 `UGameplayTasksComponent` 的
+
+### 游戏事件
+
+![](Images/025.png)
+
+GAS 提供手动触发游戏事件
+
+- 事件靠 Tag 识别, 可写代 Payload 数据
+- 可触发技能
+- 在另一端可等待具体 Tag 事件触发
+
+![](Images/026.png)
+
+GA 在 Wait GameplayEvent 的时候会在 ASC 内部记录一个回调, 通过 Tag 来映射识别; 而当外部别的 GA 调用 Send GameplayEvent 的时候, 会用 Event 的 Tag 在 ASC 的映射表中搜索, 如果搜索到就会触发对应的回调
+
+### AbilitySystemComponent
+
+游戏技能组件
+
+- ASC 负责管理协调其他部分: Ability、 Effect、 Attribute、 Task、 Event...
+- ASC 是技能系统运行的核心
+- 拥有 ASC 的 Actor 才拥有释放技能的能力
+- ASC 放在 Pawn 还是 PlayerState 上, 这是一个问题
+
+如果是联机游戏, 推荐放在 PlayerState 上, 因为可以同步给客户端; Pawn 则有可能死亡, 重生后丢失状态
+
+比如: dota 的英雄死亡会被Destroy掉, 如果 ASC 在 Pawn 上那么所有的数据也就丢失了, 此时角色重生之后技能的 CD 信息也就没有了
+
+![](Images/027.png)
+
+从上图的继承关系可以发现, ASC 继承自 `UGameplayTasksComponent`, 所以它具有执行 Task 的能力; 同时实现了多个接口
+
+ASC 可以挂在在 `Owner Actor` 上, 初始化的时候会寻找 `OwnerActor` 上的 `AttributeSet` 进行注册
+
+ASC 是运行的核心, 很多函数其实都是通过 ASC 转发
+
+技能互相作用: 其实就是一个 Actor 上的 ASC 作用到另一个 Actor 上的 ASC
+
+### 总结
+
+![](Images/028.png)
+
+## 简单使用
 
 [GAS插件介绍（入门篇）](https://www.bilibili.com/video/BV1X5411V7jh/)
 
@@ -258,4 +446,3 @@ struct GAMEPLAYABILITIES_API FGameplayAttributeData
 
 这么定义的原因是方便数据回滚, 比如Player得到一个buff可以增加攻击力10% 持续5s, 通过区分`BaseValue` 和 `CurrentValue`可以方便计算移除buff后的数值
 
-### 注意点
