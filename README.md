@@ -446,3 +446,404 @@ struct GAMEPLAYABILITIES_API FGameplayAttributeData
 
 这么定义的原因是方便数据回滚, 比如Player得到一个buff可以增加攻击力10% 持续5s, 通过区分`BaseValue` 和 `CurrentValue`可以方便计算移除buff后的数值
 
+## 基于GAS的多人游戏编程
+
+你的一款游戏中的角色可以做很多不同的事情: 跳跃、射击、短跑等, 在某些时候不得不执行定义关系的规则, 比如射击时不能冲刺等
+
+对于新手来说 if-else 或许是一个常规选择, 并且对于自己写的框架往往会出现错误和设计问题, 需要花费时间进行处理
+
+GAS 将每种能力识别为一个单独的对象, 他们的能力可以运行自己的逻辑; 不是试图创建严格的状态机, 而是通过轻量级游戏标签( `GameplayTags` )处理能力之间的关系
+
+GAS 主要由: Ability、System、Component Ability、Gampelay Tasks、Gameplay Tags、Gameplay Attributes、Gameplay Effects、Gameplay Cues 和 GameplayEvents 组成
+
+### 从 ASC 开始
+
+#### 给予 GA
+
+在激活一个能力之前, 需要先将其将给 Actor: `GiveAbility` 和 `GiveAbilityAndActivateOnce` 接口
+
+```cpp
+FGameplayAbilitySpecHandle UAbilitySystemComponent::GiveAbility(const FGameplayAbilitySpec& Spec)
+{
+  // 有效性判断.... 代码已经跳过
+
+  // 如果是客户端模拟的Actor则不允许客户端提供能力, 而是服务器提供
+  if (!IsOwnerActorAuthoritative())
+  {
+    ABILITY_LOG(Error, TEXT("GiveAbility called on ability %s on the client, not allowed!"), *Spec.Ability->GetName());
+
+    return FGameplayAbilitySpecHandle();
+  }
+
+  // 因为 GAS 支持多线程, 所以这里使用了范围锁
+  // 如果ASC被锁定，也就是正在处理技能相关的逻辑，那么将Spec添加到待处理列表中，返回它的句柄
+  if (AbilityScopeLockCount > 0)
+  {
+    AbilityPendingAdds.Add(Spec);
+    return Spec.Handle;
+  }
+
+  ABILITYLIST_SCOPE_LOCK();
+
+  // 在这里, 将能力添加到 ASC 的激活能力的容器中 
+  FGameplayAbilitySpec& OwnedSpec = ActivatableAbilities.Items[ActivatableAbilities.Items.Add(Spec)];
+
+  // 根据 GA 的设置判断此时是否需要实例化
+  if (OwnedSpec.Ability->GetInstancingPolicy() == EGameplayAbilityInstancingPolicy::InstancedPerActor)
+  {
+    // 创建实例化的 GA
+    CreateNewInstanceOfAbility(OwnedSpec, Spec.Ability);
+  }
+
+  OnGiveAbility(OwnedSpec);
+  MarkAbilitySpecDirty(OwnedSpec, true);
+
+  return OwnedSpec.Handle;
+}
+```
+
+`GiveAbility` 函数返回的 `Handle` 是一个 `FGameplayAbilitySpecHandle` 类型的对象，它是一个用于标识 `Spec` 的结构体，包含了一个 `GUID` （全局唯一标识符）和一个版本号。通过这个 `Handle` ，可以在 `ASC` 中找到对应的 `Spec` ，或者在网络中同步 `Spec` 的数据。
+
+通过 `Handle` ，可以做以下一些事情：
+
+- 调用ASC的 `FindAbilitySpecFromHandle` 函数，根据 `Handle` 查找对应的 `Spec`
+- 调用ASC的 `ClearAbility` 函数，根据Handle移除对应的 `Spec`
+- 调用ASC的 `SetRemoveAbilityOnEndAbility` 函数，根据Handle设置对应的 `Spec` 是否在技能结束时移除
+- 调用ASC的 `TryActivateAbility` 函数，根据Handle尝试激活对应的 `Spec`
+- 调用ASC的 `GetActivatableGameplayAbilityFromHandle `函数，根据 `Handle` 获取对应的Spec中的 `Ability` 实例
+- 调用ASC的 `GetAbilityLevel` 函数，根据 `Handle` 获取对应的 `Spec` 中的技能等级
+- 调用ASC的 `SetAbilityLevel` 函数，根据 `Handle` 设置对应的 `Spec` 中的技能等级
+- 调用ASC的 `MarkAbilitySpecDirty` 函数，根据 `Handle` 标记对应的 `Spec` 为脏数据，并通知服务器或客户端
+
+GA 有三种实例化方式: `NonInstanced`、`InstancedPerActor`、`InstancedPerExecution`, 对应的代码如下   
+
+```cpp
+enum Type
+{
+  // GA 不会被实例化. 每次都是执行该 GA 的 CDO.
+  NonInstanced, 
+
+  // 每个 Actor 都有一个实例化的 GA. State can be saved, replication is possible.
+  InstancedPerActor,
+
+  // 在每次执行的时候实例化 GA. Replication possible but not recommended.
+  InstancedPerExecution,
+};
+```
+
+针对存储 GA 的容器
+
+```cpp
+UPROPERTY(ReplicatedUsing=OnRep_ActivateAbilities, BlueprintReadOnly, Category = "Abilities")
+FGameplayAbilitySpecContainer ActivatableAbilities;
+
+USTRUCT(BlueprintType)
+struct GAMEPLAYABILITIES_API FGameplayAbilitySpecContainer : public FFastArraySerializer
+{
+  // ...省略部分
+
+  /** List of activatable abilities */
+  UPROPERTY()
+  TArray<FGameplayAbilitySpec> Items;
+
+  /** Component that owns this list */
+  UPROPERTY(NotReplicated)
+  TObjectPtr<UAbilitySystemComponent> Owner;
+
+  /** Initializes Owner variable */
+  void RegisterWithOwner(UAbilitySystemComponent* Owner);
+
+  // 支持复制, 并且默认情况下可以根据设置复制规范
+  bool NetDeltaSerialize(FNetDeltaSerializeInfo & DeltaParms)
+  {
+    return FFastArraySerializer::FastArrayDeltaSerialize<FGameplayAbilitySpec, FGameplayAbilitySpecContainer>(Items, DeltaParms, *this);
+  }
+
+  template< typename Type, typename SerializerType >
+  bool ShouldWriteFastArrayItem(const Type& Item, const bool bIsWritingOnClient)
+  {
+    // 如果不希望 Ability Spec 被复制, 可以返回False
+    if (!Item.ShouldReplicateAbilitySpec())
+    {
+      return false;
+    }
+
+    if (bIsWritingOnClient)
+    {
+      return Item.ReplicationID != INDEX_NONE;
+    }
+
+    return true;
+  }
+};
+```
+
+`CreateNewInstanceOfAbility` 是如何创建实例并添加到容器中的
+
+```cpp
+UGameplayAbility* UAbilitySystemComponent::CreateNewInstanceOfAbility(FGameplayAbilitySpec& Spec, const UGameplayAbility* Ability)
+{
+  // 省略检查
+
+  AActor* Owner = GetOwner();
+
+  // 在拥有者的内存空间中，根据Ability的类类型，创建一个新的Ability对象，检查是否成功
+  UGameplayAbility * AbilityInstance = NewObject<UGameplayAbility>(Owner, Ability->GetClass());
+
+  // 根据Ability的复制策略，将新创建的Ability实例添加到Spec的复制实例列表或非复制实例列表中，以防止它被垃圾回收
+  if (AbilityInstance->GetReplicationPolicy() != EGameplayAbilityReplicationPolicy::ReplicateNo)
+  {
+    // 如果Ability需要复制，还要调用AddReplicatedInstancedAbility函数，将它添加到ASC的复制实例列表中，并通知服务器
+    Spec.ReplicatedInstances.Add(AbilityInstance);
+    AddReplicatedInstancedAbility(AbilityInstance);
+  }
+  else
+  {
+    Spec.NonReplicatedInstances.Add(AbilityInstance);
+  }
+
+  return AbilityInstance;
+}
+```
+
+#### 激活 GE
+
+可以通过 `ApplyGameplayEffectSpecToSelf` 函数来应用 GE
+
+该函数做了很多事情
+
+1. 如果 GE 是持续性的效果, 那么会先在 ASC 中查找是否已经存在一个相同的效果, 如果存在相同的效果, 那么会合并两个效果, 也就是重置已有效果的开始时间, 并返回已有效果的句柄
+2. 如果 GE 不是持续性效果, 或者没有找到相同的效果, 那么会创建一个新的 GE 对象, 并用 Spec 和 预测键 来初始化 
+  - 预测键: 用于网络同步和预测的一个结构体, 可以标识效果是由谁发起的, 以及是否需要确认或拒绝
+  - 然后会通过 `UAbilitySystemGlobals::Get().GlobalPreGameplayEffectSpecApply` 来在全局范围内触发一个事件, 通知其他系统有一个新的 Spec 要被应用
+  - 然后调用 `OurCopyOfSpec->CaptureAttributeDataFromTarget(this)` 将目标的 `AttributeData` 保存在 GE 中
+3. 然后会判断是否需要将 Spec 视为无限持续的效果, 如果是那么会在 Spec 中添加一个修改器( `Modifier` ) 将持续时间设置为无限
+     - `bool bTreatAsInfiniteDuration = GetOwnerRole() != ROLE_Authority && PredictionKey.IsLocalClientKey() && Spec.Def->DurationPolicy == EGameplayEffectDurationType::Instant;` 通过这段代码去判断是否需要设置为无限
+     - 首先，它会获取ASC的拥有者角色，也就是拥有技能的Actor的角色，比如服务器、客户端、模拟代理等。如果拥有者角色不是服务器，也就是不是网络权威端，那么继续判断下一个条件
+     - 然后，它会获取传入的预测键，也就是用于网络同步和预测的一个结构体，它可以标识效果是由谁发起的，以及是否需要确认或拒绝。如果预测键是一个本地客户端键，也就是由本地客户端发起的效果，并且没有被服务器确认或拒绝，那么继续判断下一个条件
+     - 最后，它会获取Spec的持续策略，也就是效果是瞬时的、无限的还是有限的。如果持续策略是瞬时的，也就是效果只会执行一次并立即结束，那么满足所有条件
+     - 如果满足所有条件，那么将 `bTreatAsInfiniteDuration` 设为 true ，表示需要将 `Spec` 视为无限持续的效果。这样做的目的是为了在预测模式下保证效果能够正确地执行和复制
+4. 然后判断是否需要触发 GC 事件, 也就是一些外部提示效果, 比如: 粒子特效、声音等。如果需要, 并且激活效果对象存在并且没有被抑制, 并且没有找到相同的可堆叠效果或者Spec不一致堆叠提示效果, 那么它会调用 `InvokeGameplayCueEvent` 或者 `UAbilitySystemGlobals::Get().GetGameplayCueManager()->InvokeGameplayCueAddedAndWhileActive_FromSpec` 函数，在本地或者远程触发 `GameplayCue` 事件
+5. 如果无限持续的效果(非权威、是由预测而来) 那么就只通过 `UAbilitySystemGlobals::InvokeGameplayCueExecuted_FromSpec` 添加 GC 
+6. 如果是瞬时执行的(是权威), 那么就执行 GE 的效果 `ExecuteGameplayEffect` 
+7. 然后通过 `ActiveGameplayEffects.AttemptRemoveActiveEffectsOnEffectApplication` 来检查是否有一些已存在的 GE 需要被移除, 比如因为互斥或者替换等原因
+8. 然后遍历 `Spec` 的目标效果列表, 并递归的调用 `ApplyGameplayEffectSpecToSelf` 将这些 GE 也应用到自身
+
+**在 `bTreatAsInfiniteDuration` 值的赋值过程中, 为什么 GE 的 `DurationPolicy` 是 `EGameplayEffectDurationType::Instant` 瞬时的, 确要将 `bTreatAsInfiniteDuration` 设置为 true?**
+
+这是为了解决一个网络同步和预测的问题。在网络游戏中，客户端和服务器之间会有一定的延迟，导致客户端看到的效果和服务器看到的效果可能不一致。为了提高游戏体验，客户端会在没有收到服务器的确认或拒绝之前，先预测效果的结果，并显示给玩家。这样可以减少玩家感觉到的延迟，但也可能导致预测错误，比如效果被服务器拒绝或者修改
+
+对于瞬时的效果，如果客户端预测它已经执行并结束了，那么它就不会再将它复制给服务器或者其他客户端，也不会再处理服务器或者其他客户端发来的关于这个效果的消息。这样就可能导致效果在不同的角色之间不一致，比如客户端看到自己造成了伤害，但是服务器和其他客户端看到目标没有受伤
+
+为了避免这种情况，客户端在预测模式下会将瞬时的效果视为无限持续的效果，也就是将它添加到ASC中，并等待服务器或者其他客户端的确认或拒绝。这样可以保证效果能够正确地执行和复制，以及及时地处理网络消息。当然，这样做也会占用一些内存空间，所以只有在必要的时候才会这样做
+
+**Unreal 引擎中 Actor 在网络游戏中的有哪些不同角色**
+
+```cpp
+UENUM()
+enum ENetRole
+{
+	/** No role at all. */
+	ROLE_None,
+	/** Locally simulated proxy of this actor. */
+	ROLE_SimulatedProxy,
+	/** Locally autonomous proxy of this actor. */
+	ROLE_AutonomousProxy,
+	/** Authoritative control over the actor. */
+	ROLE_Authority,
+	ROLE_MAX,
+};
+```
+
+- `ROLE_None`: 没有任何角色，也就是不参与网络同步和预测，一般用于单机游戏或者不需要网络的Actor
+- `ROLE_SimulatedProxy`: 模拟代理，也就是由服务器控制的Actor的客户端副本，它会接收服务器发来的状态更新，并模拟Actor的行为，但不能自主地改变Actor的状态
+- `ROLE_AutonomousProxy`: 自主代理，也就是由客户端控制的Actor的客户端副本，它可以自主地改变Actor的状态，并将其复制给服务器和其他客户端，但也需要接收服务器或者其他客户端发来的状态更新，并处理可能的预测错误
+- `ROLE_Authority`: 权威，也就是由服务器控制的Actor的服务器副本，它可以自主地改变Actor的状态，并将其复制给所有客户端，它是网络游戏中Actor状态的最终裁决者
+
+**`InvokeGameplayCueAddedAndWhileActive_FromSpec` 和 `InvokeGameplayCueExecuted_FromSpec` 的区别**
+
+`InvokeGameplayCueAddedAndWhileActive_FromSpec` 是用于触发 OnActive 和 WhileActive 两种类型的GameplayCue事件，也就是表示效果已经开始并且持续生效的提示效果，比如一个光环或者一个持续伤害
+`InvokeGameplayCueExecuted_FromSpec` 是用于触发 Executed 类型的 GameplayCue 事件，也就是表示效果已经执行并且结束的提示效果，比如一个爆炸或者一个治疗
+
+### GA
+
+一个 GA 处理能力的方式由一组策略定义
+
+![](./Images/029.png)
+
+```cpp
+UENUM(BlueprintType)
+namespace EGameplayAbilityInstancingPolicy
+{
+  /**  
+    定义了技能在执行时是如何实例化的，也就是是否会创建一个技能对象来保存状态和逻辑
+    这会影响技能的复制和预测，以及技能可以做的事情
+  */
+  enum Type
+  {
+    // 技能不会被实例化，任何执行技能的地方都是操作在技能的类默认对象（CDO）上，也就是一个模板对象
+    // 这种技能不能有状态，也不能复制或预测，只能用于一些简单的逻辑，比如修改属性或者触发事件
+    NonInstanced,
+
+    // 每个拥有技能的Actor都会有自己的技能实例，也就是一个技能对象
+    // 这种技能可以有状态，也可以复制或预测，可以用于一些复杂的逻辑，比如持续效果或者延迟操作。
+    InstancedPerActor,
+
+    // 每次执行技能都会创建一个新的技能实例，也就是一个技能对象
+    // 这种技能可以有状态，也可以复制或预测，但不推荐使用，因为会占用很多内存空间
+    // 可以用于一些特殊的逻辑，比如多段攻击或者分裂效果
+    InstancedPerExecution,
+    };
+  }
+```
+
+```cpp
+UENUM(BlueprintType)
+namespace EGameplayAbilityNetExecutionPolicy
+{
+  /** 定义了技能在网络中是如何执行的，也就是客户端是如何请求和处理服务器的响应的
+  这会影响网络同步和预测的效果和性能 */
+  enum Type
+  {
+    // 客户端在请求服务器执行技能之前，先预测技能的结果，并显示给玩家
+    // 当收到服务器的响应时，如果和预测一致，则保持不变；如果和预测不一致，则修正为服务器的结果
+    // 这种策略可以减少玩家感觉到的延迟，但也可能导致预测错误和修正抖动
+    LocalPredicted		UMETA(DisplayName = "Local Predicted"),
+
+    // 客户端不请求服务器执行技能，而是直接执行并显示给玩家。服务器也不会执行或复制这个技能
+    // 这种策略只适用于一些不影响游戏逻辑和状态的技能，比如一些纯粹的视觉或声音效果
+    LocalOnly			UMETA(DisplayName = "Local Only"),
+
+    // 服务器主动执行并复制这个技能给客户端
+    // 客户端不能请求执行这个技能，只能接收服务器发来的结果，并显示给玩家
+    // 这种策略适用于一些由服务器控制的技能，比如AI角色或者环境物体的技能
+    ServerInitiated		UMETA(DisplayName = "Server Initiated"),
+
+    // 服务器只在自己执行这个技能，并不复制给客户端
+    // 客户端不能请求或接收这个技能的结果
+    // 这种策略适用于一些只在服务器上运行的技能，比如一些后台计算或者统计功能。
+    ServerOnly			UMETA(DisplayName = "Server Only"),
+  };
+}
+```
+
+```cpp
+UENUM(BlueprintType)
+namespace EGameplayAbilityNetSecurityPolicy
+{
+  /** 定义了技能在网络中有什么样的保护措施，也就是客户端是否可以请求改变或终止这个技能的执行
+  这会影响网络安全和可靠性 */
+  enum Type
+  {
+    // 没有任何保护措施。客户端或者服务器都可以自由地请求执行、取消或结束这个技能
+    // 这种策略需要信任客户端，并且假设没有作弊或者恶意行为
+    ClientOrServer			UMETA(DisplayName = "Client Or Server"),
+
+    // 客户端请求执行这个技能会被服务器忽略。客户端只能请求取消或结束这个技能
+    // 这种策略适用于一些由服务器控制执行时机的技能，比如一些定时触发或者条件触发的技能
+    ServerOnlyExecution		UMETA(DisplayName = "Server Only Execution"),
+
+    // 客户端请求取消或结束这个技能会被服务器忽略。客户端只能请求执行这个技能
+    // 这种策略适用于一些由服务器控制结束时机的技能，比如一些持续效果或者延迟操作的技能。
+    ServerOnlyTermination	UMETA(DisplayName = "Server Only Termination"),
+
+    // 服务器控制这个技能的执行和终止。客户端任何请求都会被服务器忽略
+    // 这种策略适用于一些完全由服务器控制的技能，比如一些核心逻辑或者敏感数据的技能
+    ServerOnly				UMETA(DisplayName = "Server Only"),
+  };
+}
+```
+
+```cpp
+UENUM(BlueprintType)
+namespace EGameplayAbilityReplicationPolicy
+{
+  /** 定义了技能在网络中是如何复制状态和事件的，也就是是否会创建一个技能对象来保存状态和逻辑，并将它复制给其他角色
+  这会影响网络同步和预测，以及技能可以做的事情 */
+  enum Type
+  {
+    // 不复制这个技能的实例给任何人
+    // 这种策略适用于一些不需要网络同步和预测的技能，比如一些纯粹的视觉或声音效果
+    ReplicateNo			UMETA(DisplayName = "Do Not Replicate"),
+
+    // 复制这个技能的实例给拥有者
+    // 这种策略适用于一些需要网络同步和预测的技能，比如一些有状态或者复杂逻辑的技能
+    ReplicateYes		UMETA(DisplayName = "Replicate"),
+  };
+}
+```
+
+```cpp
+UENUM(BlueprintType)
+namespace EGameplayAbilityTriggerSource
+{
+  /**	定义了什么样的触发器会激活这个技能，以及触发器和一个标签的关系。这会影响技能的激活方式和条件 */
+  enum Type
+  {
+    // 由一个游戏事件触发，也就是一个带有有效载荷（Payload）的消息，比如伤害、死亡、碰撞等
+    // 触发器需要匹配事件中的标签，才能激活技能。
+    GameplayEvent,
+
+    // 由拥有者获得一个标签触发，也就是拥有者的标签容器中添加了一个新的标签
+    // 触发器需要匹配添加的标签，才能激活技能，并且只会在添加时触发一次
+    OwnedTagAdded,
+
+    // 由拥有者拥有一个标签触发，也就是拥有者的标签容器中已经存在了一个标签
+    // 触发器需要匹配存在的标签，才能激活技能，并且只要标签存在就会持续激活
+    OwnedTagPresent,
+  };
+}
+```
+
+GA 的触发可以有几种不同的方式开始, 通过 `GameplayTag` 或者 类 来调用 `UAbilitySystemComponent::TryActivateAbility` 方法来激活内部 GA
+
+接下来是 `TryActivateAbility` 的执行顺序
+
+`TryActivateAbility` 的**参数**是一个技能句柄，表示要激活的技能，以及一个布尔值，表示是否允许远程激活，也就是客户端向服务器请求激活。它的返回值是一个布尔值，表示是否成功激活了技能
+
+1. 根据技能的 Handle 找到对应的 Spec, 也就是一个包含节能对象 和 一些属性的结构体
+2. 获得 `UGameplayAbility` 和 `FGameplayAbilityActorInfo`对象
+3. 获取目标 `Actor` 的网络模式（ `NetMode` ），也就是服务器、客户端或者模拟代理。如果是模拟代理，那么返回false，因为模拟代理不能主动激活技能
+4. 如果不是本地控制并且允许远程激活, 那么向服务器发送一个客户端尝试激活技能的消息(`ClientTryActivateAbility`), 并返回true
+5. 如果不是服务器，并且允许远程激活，那么先调用技能的 `CanActivateAbility` 函数，检查是否满足激活条件
+     - 如果满足，那么向服务器发送一个服务器尝试激活技能的消息（`CallServerTryActivateAbility`），并返回true
+     - 如果不满足，那么调用 `NotifyAbilityFailed函数` ，通知失败的原因，并返回false
+     - 如果不允许远程激活，那么打印一个日志信息，并返回false
+6. 调用 `InternalTryActivateAbility` 函数，在本地尝试激活技能，并返回结果
+7. 最终会调用到 GA 的 `CallActivateAbility` 函数
+
+**`!bIsLocal && (Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::LocalOnly || Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::LocalPredicted)` 出现的情况一般如下**: 
+
+- 一个由服务器控制的AI角色想要使用一个LocalOnly或者LocalPredicted的技能，比如一个闪避或者冲刺的技能。这种情况下，服务器不能直接执行这个技能，而是需要向客户端发送一个请求，让客户端在本地执行这个技能，并显示给玩家
+- 一个由其他客户端控制的Actor想要使用一个LocalOnly或者LocalPredicted的技能，比如一个隐身或者变形的技能。这种情况下，其他客户端不能直接执行这个技能，而是需要向服务器发送一个请求，让服务器转发给本地客户端，让本地客户端在本地执行这个技能，并显示给玩家
+
+**`NetMode != ROLE_Authority && (Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::ServerOnly || Ability->GetNetExecutionPolicy() == EGameplayAbilityNetExecutionPolicy::ServerInitiated)` 出现的情况一般如下**:
+
+- 一个由本地客户端控制的Actor想要使用一个 `ServerOnly` 或者 `ServerInitiated` 的技能，比如一个召唤或者治疗的技能。这种情况下，本地客户端不能直接执行这个技能，而是需要向服务器发送一个请求，让服务器在服务器端执行这个技能，并复制给所有客户端
+- 一个由模拟代理控制的Actor想要使用一个 `ServerOnly` 或者 `ServerInitiated` 的技能，比如一个爆炸或者击退的技能。这种情况下，模拟代理不能直接执行这个技能，而是需要等待服务器发来的指令，让服务器在服务器端执行这个技能，并复制给所有客户端
+
+在 `GamepalyAbility` 中, 可以通过重写一些函数来处理 GA 执行流程
+
+### GameplayTask
+
+`GameplayTask` 是一个用于实现异步逻辑和效果的类，它可以在技能或者效果中使用，以便于实现一些延迟、循环、分支或者并行的操作
+
+`GameplayTask` 可以通过 C++ 编写, 它的创建是通过静态函数从代码中进行的, 它可以从蓝图中给访问
+
+[GameplayTask与GameplayTasksComponent协作流程分析](https://zhuanlan.zhihu.com/p/76925045)
+
+### 定制 ASC 
+
+记得在 `build.cs` 中引入 `GameplayAbilities` 和 `GameplayTasks` 模块
+
+新建 `AG_AbilitySystemComponent` 类继承于 `AbilitySystemComponent`
+
+新建 `AG_AttributeSetBase` 类继承于 `AttributeSetBase`
+
+新建 `AG_GameInstance` 类继承于 `GameInstance` 用于初始化 `UAbilitySystemGlobals`
+
+![](./Images/030.png)
+
+> 从 `AttributeSet.h` 文件中可以发现它提示了你一些写法
+
+然后在 `Character` 的基类上添加一些方法用于初始化 GA、GE 和 ASC
