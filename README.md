@@ -448,6 +448,8 @@ struct GAMEPLAYABILITIES_API FGameplayAttributeData
 
 ## 基于GAS的多人游戏编程
 
+[基于GAS的多人游戏编程](https://www.bilibili.com/video/BV1Xs4y1b7h7)
+
 你的一款游戏中的角色可以做很多不同的事情: 跳跃、射击、短跑等, 在某些时候不得不执行定义关系的规则, 比如射击时不能冲刺等
 
 对于新手来说 if-else 或许是一个常规选择, 并且对于自己写的框架往往会出现错误和设计问题, 需要花费时间进行处理
