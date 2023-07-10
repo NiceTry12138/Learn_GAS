@@ -7,6 +7,7 @@
 #include "Abilities/GameplayAbility.h"
 #include "GameFramework/Character.h"
 #include "AbilitySystemInterface.h"
+#include "DataAssets/CharacterDataAsset.h"
 #include "GasLearnCharacter.generated.h"
 
 class UAG_AttributeSetBase;
@@ -14,6 +15,8 @@ class UGA_AbilitySystemComponentBase;
 
 class UGameplayEffect;
 class UGameplayAbility;
+
+class UCharacterDataAsset;
 
 UCLASS(config=Game)
 class AGasLearnCharacter : public ACharacter, public IAbilitySystemInterface
@@ -53,21 +56,11 @@ public:
 
 protected:
 
-	void InitializeAttributes();
 	void GiveAbilities();
 	void ApplyStartupEffect();
 	
 	virtual void PossessedBy(AController* NewController) override;
 	virtual void OnRep_PlayerState() override;
-
-	UPROPERTY(BlueprintReadOnly, EditDefaultsOnly, Category = "GAS")
-	TSubclassOf<UGameplayEffect> DefaultAttributeSet;
-
-	UPROPERTY(BlueprintReadOnly, EditDefaultsOnly, Category = "GAS")
-	TArray<TSubclassOf<UGameplayAbility>> DefaultAbilities;
-
-	UPROPERTY(BlueprintReadOnly, EditDefaultsOnly, Category = "GAS")
-	TArray<TSubclassOf<UGameplayEffect>> DefaultEffects;
 
 	UPROPERTY(EditDefaultsOnly)
 	UGA_AbilitySystemComponentBase* AbilitySystemComponent;
@@ -94,5 +87,30 @@ public:
 	FORCEINLINE class USpringArmComponent* GetCameraBoom() const { return CameraBoom; }
 	/** Returns FollowCamera subobject **/
 	FORCEINLINE class UCameraComponent* GetFollowCamera() const { return FollowCamera; }
+
+
+public:
+
+	UFUNCTION(BlueprintCallable)
+	FCharacterData GetCharacterData() const;
+
+	UFUNCTION(BlueprintCallable)
+	void SetCharacterData(const FCharacterData& InCharacterData);
+
+protected:
+	UPROPERTY(ReplicatedUsing = OnRep_CharacterData)
+	FCharacterData CharacterData;
+
+	UFUNCTION()
+	void OnRep_CharacterData();
+
+	virtual void InitFromCharacterData(const FCharacterData& InCharacterData, bool bFromReplicatoin = false);
+
+	UPROPERTY(EditDefaultsOnly)
+	UCharacterDataAsset* CharacterDataAsset;
+	
+	virtual void PostInitializeComponents() override;
+
+	virtual void GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const override;
 };
 

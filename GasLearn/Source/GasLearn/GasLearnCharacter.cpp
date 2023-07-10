@@ -15,6 +15,8 @@
 #include "AbilitySystem/Attribute/AG_AttributeSetBase.h"
 #include "AbilitySystem/Components/GA_AbilitySystemComponentBase.h"
 
+#include "Net/UnrealNetwork.h"
+
 //////////////////////////////////////////////////////////////////////////
 // AGasLearnCharacter
 
@@ -81,20 +83,10 @@ UAbilitySystemComponent* AGasLearnCharacter::GetAbilitySystemComponent() const
 	return AbilitySystemComponent;
 }
 
-void AGasLearnCharacter::InitializeAttributes()
-{
-	if (GetLocalRole() == ENetRole::ROLE_Authority && DefaultAttributeSet && AttributeSet) {
-		FGameplayEffectContextHandle EffectContext = AbilitySystemComponent->MakeEffectContext();
-		EffectContext.AddSourceObject(this);
-
-		ApplyGameplayEffectToSelf(DefaultAttributeSet, EffectContext);
-	}
-}
-
 void AGasLearnCharacter::GiveAbilities()
 {
 	if (HasAuthority() && AbilitySystemComponent) {
-		for (auto& DefaultAbility : DefaultAbilities) {
+		for (auto& DefaultAbility : CharacterData.DefaultAbilities) {
 			AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(DefaultAbility));
 		}
 	}
@@ -106,7 +98,7 @@ void AGasLearnCharacter::ApplyStartupEffect()
 		FGameplayEffectContextHandle EffectContext = AbilitySystemComponent->MakeEffectContext();
 		EffectContext.AddSourceObject(this);
 
-		for (auto& DefaultEffect : DefaultEffects) {
+		for (auto& DefaultEffect : CharacterData.DefaultEffects) {
 			ApplyGameplayEffectToSelf(DefaultEffect, EffectContext);
 		}
 	}
@@ -118,7 +110,6 @@ void AGasLearnCharacter::PossessedBy(AController* NewController)
 
 	AbilitySystemComponent->InitAbilityActorInfo(this, this);
 
-	InitializeAttributes();
 	GiveAbilities();
 	ApplyStartupEffect();
 }
@@ -128,7 +119,6 @@ void AGasLearnCharacter::OnRep_PlayerState()
 	Super::OnRep_PlayerState();
 
 	AbilitySystemComponent->InitAbilityActorInfo(this, this);
-	InitializeAttributes();
 }
 
 void AGasLearnCharacter::BeginPlay()
@@ -144,6 +134,43 @@ void AGasLearnCharacter::BeginPlay()
 			Subsystem->AddMappingContext(DefaultMappingContext, 0);
 		}
 	}
+}
+
+FCharacterData AGasLearnCharacter::GetCharacterData() const
+{
+	return CharacterData;
+}
+
+void AGasLearnCharacter::SetCharacterData(const FCharacterData& InCharacterData)
+{
+	CharacterData = InCharacterData;
+	InitFromCharacterData(CharacterData);
+}
+
+void AGasLearnCharacter::OnRep_CharacterData()
+{
+	InitFromCharacterData(CharacterData, true);
+}
+
+void AGasLearnCharacter::InitFromCharacterData(const FCharacterData& InCharacterData, bool bFromReplicatoin)
+{ 
+
+}
+
+void AGasLearnCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	if (IsValid(CharacterDataAsset)) {
+		SetCharacterData(CharacterDataAsset->CharacterData);
+	}
+}
+
+void AGasLearnCharacter::GetLifetimeReplicatedProps(TArray<class FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(AGasLearnCharacter, CharacterData);
 }
 
 //////////////////////////////////////////////////////////////////////////

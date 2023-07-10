@@ -834,7 +834,7 @@ GA 的触发可以有几种不同的方式开始, 通过 `GameplayTag` 或者 �
 
 [GameplayTask与GameplayTasksComponent协作流程分析](https://zhuanlan.zhihu.com/p/76925045)
 
-### 定制 ASC 
+### 开始编写代码
 
 记得在 `build.cs` 中引入 `GameplayAbilities` 和 `GameplayTasks` 模块
 
@@ -849,3 +849,18 @@ GA 的触发可以有几种不同的方式开始, 通过 `GameplayTag` 或者 �
 > 从 `AttributeSet.h` 文件中可以发现它提示了你一些写法
 
 然后在 `Character` 的基类上添加一些方法用于初始化 GA、GE 和 ASC
+
+使用 `showdebug abilitysystem` 命令可以开启 GAS 的 Debug 
+
+![](./Images/031.png)
+
+开启 GAS 的 Debug 效果之后可以从左侧看到属性: Health、MaxHealth
+
+![](./Images/032.png)
+
+新建初始化属性的 GE, 并且设置到 Character 上, 之后再运行并 Debug 可以发现角色的属性被设置了
+
+可以将角色默认携带的 `TArray<GE>` 和 `TArray<GA>` 封装到 `DataAsset` 中, 方便复用
+
+> DataAsset允许开发者将静态数据（例如配置参数、游戏设置、游戏关卡信息等）保存在一个可编辑的资源文件中。这些数据可以在项目中共享和复用，而无需在代码中硬编码，从而提高了数据管理的灵活性和可维护性
+
